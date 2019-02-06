@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 
 	"golang.org/x/net/html"
 )
@@ -60,6 +61,7 @@ func main() {
 
 // fetch the requested webpage
 func fetch(url <-chan string, found chan []string, signal chan struct{}) {
+	var wg sync.WaitGroup
 	for u := range url {
 		fmt.Printf("Inside len(url) %d\n", len(url))
 		fmt.Printf("Fetching %s\n", u)
@@ -73,7 +75,11 @@ func fetch(url <-chan string, found chan []string, signal chan struct{}) {
 		var buf bytes.Buffer
 		tee := io.TeeReader(resp.Body, &buf)
 
+		// Save the webpage to a file
 		z := html.NewTokenizer(tee)
+
+		wg.Add(1)
+		go saveToFile(buf, u, &wg)
 
 		// find all the links
 		var links []string
@@ -111,4 +117,12 @@ func fetch(url <-chan string, found chan []string, signal chan struct{}) {
 		// Inform master thread that this goroutine has finished
 		signal <- EMPTY
 	}
+	wg.Wait()
+}
+
+func saveToFile(page bytes.Buffer, filename string, wg *sync.WaitGroup) {
+	re := regexp.MustCompile("/")
+	filename = re.ReplaceAllString(filename, "-")
+	ioutil.WriteFile("/tmp/"+filename, page.Bytes(), 0644)
+	wg.Done()
 }
