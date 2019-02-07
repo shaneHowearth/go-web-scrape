@@ -2,39 +2,47 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/net/html"
 )
 
-const MAXSCRAPERS = 3
-const DOMAIN = "https://www.stuff.co.nz"
+var maxScrapers int
+var domain string
+var saveTo string
+var save bool
+var delay int
 
 var EMPTY struct{}
 
 func main() {
-	found := make(chan []string, MAXSCRAPERS*2)
+	setOptions()
+	checkOptions(maxScrapers)
+	found := make(chan []string, maxScrapers*2)
 	todo := make(map[string]struct{})
 	done := make(map[string]struct{})
 	// NOTE: The size of this buffer/channel needs to be able to hold all the possible urls
 	// If the channel is too small, then the scrapers will block trying to send to it, and the main thread will not be able to clear the channel as it will be waiting for the worker goroutines to  signal that they have completed their task.
 	url := make(chan string, 10000)
-	signal := make(chan struct{}, MAXSCRAPERS)
+	signal := make(chan struct{}, maxScrapers)
 	alive := 0
 
-	for i := 0; i < MAXSCRAPERS; i++ {
+	for i := 0; i < maxScrapers; i++ {
 		// Pool workers
 		go fetch(url, found, signal)
 	}
 
 	alive += 1
-	start := DOMAIN + "/"
+	start := domain + "/"
 	todo[start] = EMPTY
 	url <- start
 	done[start] = EMPTY
@@ -49,7 +57,7 @@ func main() {
 				todo[link] = EMPTY
 				if _, ok := done[link]; !ok {
 					alive += 1
-					url <- DOMAIN + link
+					url <- domain + link
 					done[link] = EMPTY
 				}
 			}
@@ -63,8 +71,7 @@ func main() {
 func fetch(url <-chan string, found chan []string, signal chan struct{}) {
 	var wg sync.WaitGroup
 	for u := range url {
-		fmt.Printf("Inside len(url) %d\n", len(url))
-		fmt.Printf("Fetching %s\n", u)
+		time.Sleep(time.Duration(delay) * time.Millisecond)
 		resp, err := http.Get(u)
 		if err != nil {
 			panic(err)
@@ -78,9 +85,10 @@ func fetch(url <-chan string, found chan []string, signal chan struct{}) {
 		// Save the webpage to a file
 		z := html.NewTokenizer(tee)
 
-		wg.Add(1)
-		go saveToFile(buf, u, &wg)
-
+		if save {
+			wg.Add(1)
+			go saveToFile(buf, u, &wg)
+		}
 		// find all the links
 		var links []string
 		for {
@@ -104,6 +112,7 @@ func fetch(url <-chan string, found chan []string, signal chan struct{}) {
 							matchedj, _ := regexp.MatchString(".*javascript.*", link)
 							matchedm, _ := regexp.MatchString(".*mailto.*", link)
 							if !matched && !matcheds && !matchedj && !matchedm {
+								link = strings.TrimPrefix(link, "www.stuff.co.nz")
 								links = append(links, link)
 							}
 						}
@@ -117,12 +126,42 @@ func fetch(url <-chan string, found chan []string, signal chan struct{}) {
 		// Inform master thread that this goroutine has finished
 		signal <- EMPTY
 	}
-	wg.Wait()
+	// Wait for any file save goroutines to complete before exiting
+	if save {
+		wg.Wait()
+	}
 }
 
 func saveToFile(page bytes.Buffer, filename string, wg *sync.WaitGroup) {
 	re := regexp.MustCompile("/")
 	filename = re.ReplaceAllString(filename, "-")
-	ioutil.WriteFile("/tmp/"+filename, page.Bytes(), 0644)
+	ioutil.WriteFile(saveTo+"/"+filename, page.Bytes(), 0644)
 	wg.Done()
+}
+
+func setOptions() {
+	// Set the options from commandline parameters (if supplied)
+	defer flag.Parse()
+	// Max scrapers
+	flag.IntVar(&maxScrapers, "max-scrapers", 3, "Set the maximum number of scraper threads to be running, default: 3.")
+	// Domain
+	flag.StringVar(&domain, "domain", "www.google.com", "Domain that will be scraped.")
+	// Save pages
+	flag.BoolVar(&save, "save", true, "Save the downloaded pages.")
+	// Directory to save webpages in
+	flag.StringVar(&saveTo, "directory", "/tmp", "Directory that downloaded pages will be saved to, default is /tmp.")
+	// Nice, delay each search by n seconds so the domain being scraped isn't slammed
+	flag.IntVar(&delay, "delay", 0, "Delay each webpage fetch by n seconds (so you're not slamming the site).")
+}
+
+func checkOptions(maxScrapers int) {
+	stop := false
+	if maxScrapers == 0 {
+		fmt.Println("Cannot have zero scrapers, nothing will be done!")
+		stop = true
+	}
+	if stop {
+		fmt.Println("Exiting...")
+		os.Exit(0)
+	}
 }
